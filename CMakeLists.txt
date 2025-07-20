@@ -8,6 +8,7 @@ cmake_policy(SET CMP0167 NEW)
 # Build options
 option(BUILD_TESTS "Build test suite" OFF)
 option(ENABLE_COVERAGE "Enable code coverage" OFF)
+option(BUILD_EXAMPLES "Build example clients" OFF)
 
 # Enable parallel compilation with your 24 threads
 set(CMAKE_BUILD_PARALLEL_LEVEL 24)
@@ -92,7 +93,6 @@ add_compile_options(
     -Wpedantic
     -Wno-deprecated-declarations
     -fPIC
-    -pthread
 )
 
 # Configuration-specific flags
@@ -293,6 +293,10 @@ if(BUILD_TESTS)
             COMMENT "Generating coverage report"
         )
     endif()
+endif()
+
+if (BUILD_EXAMPLES)
+    add_subdirectory(examples/)
 endif()
 
 # Installation
