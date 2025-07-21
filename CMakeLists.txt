@@ -26,6 +26,7 @@ find_path(CONCURRENTQUEUE_INCLUDE_DIR
           /usr/local/include/concurrentqueue
           /usr/include
           /usr/local/include
+          /opt/homebrew/Cellar/concurrentqueue/1.0.4/include/concurrentqueue
 )
 
 if(NOT CONCURRENTQUEUE_INCLUDE_DIR)
