@@ -105,14 +105,6 @@ TEST_F(VStreamAppTest, ConfigValidation) {
     // Reset to valid
     cfg = create_valid_config();
 
-    // For silence_ms, if it's unsigned, we can't test negative values
-    // Just test the upper bound
-    cfg.silence_ms = 20000;  // This should throw (> 10000)
-    EXPECT_THROW(vstream_app::validate_config(cfg), std::invalid_argument);
-
-    // Reset to valid
-    cfg = create_valid_config();
-
     // Invalid finalize_ms
     cfg.finalize_ms = 0;
     EXPECT_THROW(vstream_app::validate_config(cfg), std::invalid_argument);
@@ -153,7 +145,7 @@ TEST_F(VStreamAppTest, CommandLineParsing) {
     EXPECT_EQ(cfg.port, 9090);
     EXPECT_TRUE(cfg.use_mic);
 
-    // Test all options
+    // Test all options (VAD options removed)
     const char* argv2[] = {
         "vstream",
         "--model", "/path/to/model",
@@ -166,9 +158,7 @@ TEST_F(VStreamAppTest, CommandLineParsing) {
         "--mic",
         "--finalize-ms", "3000",
         "--mic-device", "2",
-        "--buffer-ms", "200",
-        "--silence-ms", "400",
-        "--no-vad"
+        "--buffer-ms", "200"
     };
     int argc2 = sizeof(argv2) / sizeof(argv2[0]);
 
@@ -185,18 +175,45 @@ TEST_F(VStreamAppTest, CommandLineParsing) {
     EXPECT_EQ(cfg.finalize_ms, 3000);
     EXPECT_EQ(cfg.mic_device, 2);
     EXPECT_EQ(cfg.buffer_ms, 200);
-    EXPECT_EQ(cfg.silence_ms, 400);
-    EXPECT_TRUE(cfg.silence_ms_specified);
-    EXPECT_FALSE(cfg.use_vad);
 
-    // Test unknown argument
+    // Test benchmark options
     const char* argv3[] = {
         "vstream",
-        "--unknown-option"
+        "--model", "/path/to/model",
+        "--benchmark", "/path/to/reference.txt",
+        "--benchmark-output", "/path/to/output.txt",
+        "--benchmark-format", "json"
     };
     int argc3 = sizeof(argv3) / sizeof(argv3[0]);
 
-    EXPECT_THROW(vstream_app::parse_command_line(argc3, const_cast<char**>(argv3)),
+    cfg = vstream_app::parse_command_line(argc3, const_cast<char**>(argv3));
+
+    EXPECT_TRUE(cfg.benchmark_enabled);
+    EXPECT_EQ(cfg.benchmark_reference_file, "/path/to/reference.txt");
+    EXPECT_EQ(cfg.benchmark_output_file, "/path/to/output.txt");
+    EXPECT_EQ(cfg.benchmark_format, "json");
+
+    // Test live benchmark
+    const char* argv4[] = {
+        "vstream",
+        "--model", "/path/to/model",
+        "--benchmark-live"
+    };
+    int argc4 = sizeof(argv4) / sizeof(argv4[0]);
+
+    cfg = vstream_app::parse_command_line(argc4, const_cast<char**>(argv4));
+
+    EXPECT_TRUE(cfg.benchmark_enabled);
+    EXPECT_TRUE(cfg.benchmark_live);
+
+    // Test unknown argument
+    const char* argv5[] = {
+        "vstream",
+        "--unknown-option"
+    };
+    int argc5 = sizeof(argv5) / sizeof(argv5[0]);
+
+    EXPECT_THROW(vstream_app::parse_command_line(argc5, const_cast<char**>(argv5)),
                  std::invalid_argument);
 }
 
@@ -211,6 +228,13 @@ TEST_F(VStreamAppTest, PrintUsage) {
     EXPECT_THAT(output, HasSubstr("--model PATH"));
     EXPECT_THAT(output, HasSubstr("--port PORT"));
     EXPECT_THAT(output, HasSubstr("--mic"));
+    EXPECT_THAT(output, HasSubstr("--finalize-ms"));
+    EXPECT_THAT(output, HasSubstr("--benchmark"));
+
+    // Ensure VAD options are not in usage
+    EXPECT_THAT(output, ::testing::Not(HasSubstr("--silence-ms")));
+    EXPECT_THAT(output, ::testing::Not(HasSubstr("--no-vad")));
+    EXPECT_THAT(output, ::testing::Not(HasSubstr("VAD")));
 }
 
 // Test app construction with valid config
@@ -340,19 +364,19 @@ TEST_F(VStreamAppTest, MicrophoneConfiguration) {
     }
 }
 
-// Test VAD configuration warnings - might not appear if logger isn't initialized
-TEST_F(VStreamAppTest, VADConfigurationWarnings) {
+// Test benchmark configuration
+TEST_F(VStreamAppTest, BenchmarkConfiguration) {
     auto cfg = create_valid_config();
-    cfg.use_vad = false;
-    cfg.silence_ms = 300;
-    cfg.silence_ms_specified = true;
+    cfg.benchmark_enabled = true;
+    cfg.benchmark_live = true;
 
-    // The warning might go to logger instead of stderr
-    // Let's just test that construction doesn't crash
     try {
         app = std::make_unique<vstream_app>(cfg);
-        // If we get here, the configuration was accepted
-        SUCCEED();
+
+        auto stats = app->get_stats();
+        EXPECT_TRUE(stats.contains("benchmark"));
+        EXPECT_TRUE(stats["benchmark"]["enabled"]);
+
     } catch (const std::runtime_error& e) {
         // Expected if models aren't available
         EXPECT_THAT(std::string(e.what()), HasSubstr("model"));
@@ -365,7 +389,6 @@ TEST_F(VStreamAppTest, ConfigurationEdgeCases) {
 
     // Test minimum values
     cfg.buffer_ms = 1;
-    cfg.silence_ms = 0;
     cfg.finalize_ms = 1;
     cfg.max_alternatives = 0;
     cfg.port = 1;
@@ -374,7 +397,6 @@ TEST_F(VStreamAppTest, ConfigurationEdgeCases) {
 
     // Test maximum values
     cfg.buffer_ms = 5000;
-    cfg.silence_ms = 10000;
     cfg.finalize_ms = 30000;
     cfg.max_alternatives = 10;
     cfg.port = 65535;
@@ -403,22 +425,60 @@ TEST_F(VStreamAppTest, SampleRateValidation) {
 TEST_F(VStreamAppTest, ConfigurationDefaults) {
     vstream_app::config cfg;
 
-    // Test default values
+    // Test default values (VAD-related defaults removed)
     EXPECT_EQ(cfg.port, 8080);
     EXPECT_EQ(cfg.sample_rate, 16000);
     EXPECT_EQ(cfg.buffer_ms, 100);
-    EXPECT_EQ(cfg.silence_ms, 500);
     EXPECT_EQ(cfg.finalize_ms, 2000);
     EXPECT_EQ(cfg.max_alternatives, 0);
     EXPECT_EQ(cfg.mic_device, -1);
     EXPECT_EQ(cfg.log_level, 0);
     EXPECT_TRUE(cfg.enable_partial_words);
-    EXPECT_TRUE(cfg.use_vad);
     EXPECT_FALSE(cfg.use_mic);
-    EXPECT_FALSE(cfg.silence_ms_specified);
+    EXPECT_FALSE(cfg.benchmark_enabled);
+    EXPECT_FALSE(cfg.benchmark_live);
     EXPECT_TRUE(cfg.model_path.empty());
     EXPECT_TRUE(cfg.speaker_model_path.empty());
     EXPECT_TRUE(cfg.grammar.empty());
+    EXPECT_TRUE(cfg.benchmark_reference_file.empty());
+    EXPECT_TRUE(cfg.benchmark_output_file.empty());
+    EXPECT_EQ(cfg.benchmark_format, "txt");
+}
+
+// Test benchmark validation
+TEST_F(VStreamAppTest, BenchmarkValidation) {
+    auto cfg = create_valid_config();
+
+    // Benchmark enabled but no reference file and not live
+    cfg.benchmark_enabled = true;
+    cfg.benchmark_live = false;
+    cfg.benchmark_reference_file = "";
+    EXPECT_THROW(vstream_app::validate_config(cfg), std::invalid_argument);
+
+    // Reset to valid
+    cfg = create_valid_config();
+
+    // Valid benchmark with reference file
+    cfg.benchmark_enabled = true;
+    cfg.benchmark_reference_file = "/path/to/reference.txt";
+    EXPECT_NO_THROW(vstream_app::validate_config(cfg));
+
+    // Valid live benchmark
+    cfg.benchmark_enabled = true;
+    cfg.benchmark_live = true;
+    cfg.benchmark_reference_file = "";
+    EXPECT_NO_THROW(vstream_app::validate_config(cfg));
+
+    // Invalid benchmark format
+    cfg.benchmark_format = "invalid";
+    EXPECT_THROW(vstream_app::validate_config(cfg), std::invalid_argument);
+
+    // Valid benchmark formats
+    std::vector<std::string> valid_formats = {"txt", "json", "csv"};
+    for (const auto& format : valid_formats) {
+        cfg.benchmark_format = format;
+        EXPECT_NO_THROW(vstream_app::validate_config(cfg));
+    }
 }
 
 // Test stop functionality
@@ -475,5 +535,26 @@ TEST_F(VStreamAppTest, ConcurrentStatistics) {
     } catch (const std::runtime_error& e) {
         // Expected if models aren't available
         EXPECT_THAT(std::string(e.what()), HasSubstr("model"));
+    }
+}
+
+// Test simplified audio processing (time-based only)
+TEST_F(VStreamAppTest, SimplifiedAudioProcessing) {
+    auto cfg = create_valid_config();
+    cfg.use_mic = true;
+    cfg.finalize_ms = 1000; // Short interval for testing
+
+    try {
+        app = std::make_unique<vstream_app>(cfg);
+
+        // Test that configuration is accepted without VAD
+        auto stats = app->get_stats();
+        EXPECT_TRUE(stats.contains("microphone_enabled"));
+
+    } catch (const std::runtime_error& e) {
+        // Expected in environments without audio devices or Vosk models
+        std::string error_msg = e.what();
+        EXPECT_TRUE(error_msg.find("microphone") != std::string::npos ||
+                    error_msg.find("model") != std::string::npos);
     }
 }

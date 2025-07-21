@@ -119,11 +119,11 @@ public:
          * Controls how much audio is accumulated before delivering to callback.
          * This is important for ASR systems that process audio in chunks.
          *
-         * @note 100ms is optimal for Vosk and similar ASR engines
+         * @note 300ms is optimal for Vosk and similar ASR engines
          * @note Lower values = lower latency but more callback overhead
          * @note Higher values = better efficiency but higher latency
          */
-        int accumulate_ms = 100;
+        int accumulate_ms = 300;
 
         /**
          * @brief Default constructor with sensible defaults for ASR

@@ -20,7 +20,6 @@ vstream is a high-performance, real-time speech recognition server that provides
 ### Required Libraries
 - Vosk API - Speech recognition engine
 - PortAudio - Cross-platform audio I/O
-- libfvad - WebRTC Voice Activity Detection
 - Boost - WebSocket and system libraries
 - nlohmann/json - JSON parsing
 - moodycamel/concurrentqueue - Lock-free queue implementation

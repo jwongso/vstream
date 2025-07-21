@@ -27,12 +27,6 @@ find_path(CONCURRENTQUEUE_INCLUDE_DIR
           /usr/include
           /usr/local/include
 )
-find_path(FVAD_INCLUDE_DIR fvad.h)
-find_library(FVAD_LIBRARY fvad)
-
-if(NOT FVAD_INCLUDE_DIR OR NOT FVAD_LIBRARY)
-    message(FATAL_ERROR "libfvad not found. Please install it first.")
-endif()
 
 if(NOT CONCURRENTQUEUE_INCLUDE_DIR)
     if(EXISTS /etc/fedora-release)
@@ -206,7 +200,6 @@ find_path(VOSK_INCLUDE_DIR vosk_api.h REQUIRED)
 add_library(vstream_lib STATIC
     src/vstream_engine.cpp
     src/mic_capture.cpp
-    src/vad.cpp
     src/audio_processor.cpp
     src/vstream_app.cpp
     src/logger.cpp
@@ -218,7 +211,6 @@ target_include_directories(vstream_lib PUBLIC
     ${VOSK_INCLUDE_DIR}
     ${CONCURRENTQUEUE_INCLUDE_DIR}
     ${PORTAUDIO_INCLUDE_DIRS}
-    ${FVAD_INCLUDE_DIR}
 )
 
 target_link_libraries(vstream_lib PUBLIC
@@ -227,7 +219,6 @@ target_link_libraries(vstream_lib PUBLIC
     nlohmann_json::nlohmann_json
     Threads::Threads
     ${PORTAUDIO_LIBRARIES}
-    ${FVAD_LIBRARY}
 )
 
 # Create vstream executable
@@ -269,7 +260,6 @@ if(BUILD_TESTS)
     add_executable(vstream_tests
         tests/test_audio_processor.cpp
         tests/test_mic_capture.cpp
-        tests/test_vad.cpp
         tests/test_vstream_engine.cpp
         tests/test_vstream_app.cpp
     )

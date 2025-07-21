@@ -59,12 +59,6 @@ int vstream_app::run() {
 
         setup_signal_handlers();
 
-        // Check for incompatible options
-        if (!m_config.use_vad && m_config.silence_ms_specified) {
-            LOG_WARNING("--silence-ms specified but VAD is disabled (--no-vad). Silence threshold will be ignored for VAD.");
-            std::cerr << "Warning: --silence-ms has no effect on VAD when VAD is disabled (--no-vad).\n";
-        }
-
         // Set Vosk log level
         vosk_set_log_level(m_config.log_level);
 
@@ -237,11 +231,6 @@ vstream_app::config vstream_app::parse_command_line(int argc, char* argv[]) {
             cfg.mic_device = std::stoi(argv[++i]);
         } else if (arg == "--buffer-ms" && i + 1 < argc) {
             cfg.buffer_ms = std::stoi(argv[++i]);
-        } else if (arg == "--silence-ms" && i + 1 < argc) {
-            cfg.silence_ms = std::stoi(argv[++i]);
-            cfg.silence_ms_specified = true;
-        } else if (arg == "--no-vad") {
-            cfg.use_vad = false;
         } else if (arg == "--benchmark" && i + 1 < argc) {
             cfg.benchmark_reference_file = argv[++i];
             cfg.benchmark_enabled = true;
@@ -276,12 +265,9 @@ void vstream_app::print_usage(const char* program_name) {
               << "  --mic-device N     Specify microphone device index\n"
               << "  --buffer-ms MS     Audio buffer size in milliseconds (default: 100)\n"
               << "                     Lower = less latency, Higher = better efficiency\n"
-              << "  --silence-ms MS    Silence duration to trigger final result (default: 500)\n"
-              << "                     Only applies when VAD is enabled\n"
-              << "  --finalize-ms MS   Force finalization interval (default: 2000)\n"
-              << "                     Controls periodic finalization for both modes\n"
-              << "                     Lower = more frequent results, Higher = longer utterances\n"
-              << "  --no-vad           Disable Voice Activity Detection\n"
+              << "  --finalize-ms MS   Finalization interval in milliseconds (default: 2000)\n"
+              << "                     Controls how often results are finalized\n"
+              << "                     Lower = more frequent results, Higher = longer context\n"
               << "  --list-devices     List available audio input devices\n"
               << "  --spk-model PATH   Path to speaker model (optional)\n"
               << "  --alternatives N   Enable N-best results (default: 0)\n"
@@ -298,9 +284,9 @@ void vstream_app::print_usage(const char* program_name) {
               << "  --help             Show this help message\n"
               << "\n"
               << "Examples:\n"
-              << "  Fast response:     --buffer-ms 50 --silence-ms 100 --finalize-ms 1000\n"
-              << "  Balanced:          --buffer-ms 100 --silence-ms 300 --finalize-ms 2000\n"
-              << "  Conservative:      --buffer-ms 200 --silence-ms 500 --finalize-ms 3000\n"
+              << "  Fast response:     --buffer-ms 50 --finalize-ms 1000\n"
+              << "  Balanced:          --buffer-ms 100 --finalize-ms 2000\n"
+              << "  Long context:      --buffer-ms 200 --finalize-ms 5000\n"
               << "\n"
               << "Benchmark Examples:\n"
               << "  File benchmark:    --model model --benchmark reference.txt --mic\n"
@@ -319,10 +305,6 @@ void vstream_app::validate_config(const config& cfg) {
 
     if (cfg.buffer_ms <= 0 || cfg.buffer_ms > 5000) {
         throw std::invalid_argument("Buffer size must be between 1 and 5000 ms");
-    }
-
-    if (cfg.silence_ms < 0 || cfg.silence_ms > 10000) {
-        throw std::invalid_argument("Silence duration must be between 0 and 10000 ms");
     }
 
     if (cfg.finalize_ms <= 0 || cfg.finalize_ms > 30000) {
@@ -454,53 +436,25 @@ void vstream_app::initialize_microphone() {
     mic_cfg.sample_rate = m_config.sample_rate;
     mic_cfg.device_index = m_config.mic_device;
     mic_cfg.frames_per_buffer = m_config.buffer_ms * 16;  // Convert ms to samples
+    mic_cfg.accumulate_ms = m_config.buffer_ms;
 
     LOG_INFO("Microphone configuration: sample_rate=" + std::to_string(mic_cfg.sample_rate) +
              ", buffer_ms=" + std::to_string(m_config.buffer_ms));
 
     m_mic = std::make_unique<mic_capture>(mic_cfg);
 
-    if (m_config.use_vad) {
-        LOG_INFO("Setting up WebRTC voice activity detection...");
-        std::cout << "Setting up WebRTC voice activity detection...\n";
-
-        vad_with_hangover::config vad_cfg;
-        vad_cfg.vad_config.sample_rate = m_config.sample_rate;
-        vad_cfg.vad_config.frame_duration_ms = 20;
-        vad_cfg.vad_config.mode = webrtc_vad::Aggressiveness::AGGRESSIVE;
-        vad_cfg.hangover_ms = 150;
-        vad_cfg.startup_ms = 50;
-
-        m_vad = std::make_unique<vad_with_hangover>(vad_cfg);
-        LOG_INFO("WebRTC VAD initialized");
-    }
-
-    // Create audio processor with correct frame calculation
-    int silence_frames = m_config.silence_ms / m_config.buffer_ms;
-    LOG_INFO("Calculated silence frames: " + std::to_string(silence_frames) +
-             " (" + std::to_string(m_config.silence_ms) + "ms / " +
-             std::to_string(m_config.buffer_ms) + "ms per frame)");
-
+    // Create simplified audio processor (no VAD)
     m_processor = std::make_unique<audio_processor>(
         m_engine.get(),
         m_server.get(),
-        m_vad.get(),
-        silence_frames,
-        m_config.use_vad,
         m_config.finalize_ms,
         m_config.buffer_ms,
         m_benchmark.get());
 
-    // Set callback with benchmark integration
+    // Set callback
     m_mic->set_audio_callback([this](const std::vector<int16_t>& audio) {
         if (m_processor && !audio.empty()) {
             m_processor->process_audio(audio);
-
-            // If benchmarking is enabled, record VAD decisions
-            if (m_benchmark && m_config.benchmark_enabled && m_vad) {
-                bool vad_decision = m_vad->process(audio);
-                m_benchmark->add_vad_decision(vad_decision);
-            }
         }
     });
 
@@ -513,11 +467,6 @@ void vstream_app::initialize_microphone() {
     // Log configuration summary
     LOG_INFO("Configuration summary:");
     LOG_INFO("  Buffer size: " + std::to_string(m_config.buffer_ms) + "ms");
-    LOG_INFO("  VAD enabled: " + std::string(m_config.use_vad ? "yes" : "no"));
-    if (m_config.use_vad) {
-        LOG_INFO("  Silence threshold: " + std::to_string(m_config.silence_ms) + "ms (" +
-                 std::to_string(silence_frames) + " frames)");
-    }
     LOG_INFO("  Finalization interval: " + std::to_string(m_config.finalize_ms) + "ms");
     LOG_INFO("  Partial results: " + std::string(m_config.enable_partial_words ? "enabled" : "disabled"));
     LOG_INFO("  Benchmark enabled: " + std::string(m_config.benchmark_enabled ? "yes" : "no"));

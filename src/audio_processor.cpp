@@ -10,11 +10,8 @@
 // -------------------------------------------------------------------------------------------------
 
 #include "audio_processor.h"
-#include "vstream_engine.h"
-#include "vad.h"
 #include "benchmark_manager.h"
 #include "logger.h"
-#include <hyni/hyni_websocket_server.h>
 #include <nlohmann/json.hpp>
 #include <iostream>
 
@@ -22,22 +19,15 @@ using json = nlohmann::json;
 
 audio_processor::audio_processor(vstream_engine* engine,
                                  hyni_websocket_server* server,
-                                 vad_with_hangover* vad,
-                                 int silence_frames_threshold,
-                                 bool use_vad,
                                  int finalize_interval_ms,
                                  int buffer_ms,
                                  benchmark_manager* benchmark)
     : m_engine(engine)
     , m_server(server)
-    , m_vad(vad)
     , m_session_id("mic-capture")
-    , m_silence_frames_threshold(silence_frames_threshold)
-    , m_use_vad(use_vad)
     , m_finalize_interval_ms(finalize_interval_ms)
     , m_buffer_ms(buffer_ms)
     , m_last_finalize_time(std::chrono::steady_clock::now())
-    , m_last_debug_time(std::chrono::steady_clock::now())
     , m_benchmark(benchmark) {
 
     m_show_partial = m_engine->has_partial_enabled();
@@ -47,70 +37,30 @@ audio_processor::audio_processor(vstream_engine* engine,
     m_last_final_text.reserve(256);
     m_last_partial_text.reserve(256);
 
-    if (m_use_vad) {
-        LOG_INFO("audio_processor initialized with VAD (silence threshold: " +
-                 std::to_string(m_silence_frames_threshold) + " frames = " +
-                 std::to_string(m_silence_frames_threshold * m_buffer_ms) + "ms)");
-    } else {
-        LOG_INFO("audio_processor initialized without VAD (finalize every " +
-                 std::to_string(m_finalize_interval_ms) + "ms)");
-    }
+    LOG_INFO("audio_processor initialized without VAD (time-based finalization every " +
+             std::to_string(m_finalize_interval_ms) + "ms)");
 }
 
 void audio_processor::process_audio(const std::vector<int16_t>& audio) {
-    // Check if this is speech (always true if VAD is disabled)
-    bool is_speech = m_use_vad ? m_vad->process(audio) : true;
+    if (audio.empty()) {
+        return;
+    }
 
     auto now = std::chrono::steady_clock::now();
-
-    // Update debug status periodically
-    if (m_use_vad) {
-        update_debug_status();
-    }
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now - m_last_finalize_time).count();
 
     m_accumulated_audio_samples += audio.size();
 
-    if (is_speech) {
-        m_was_speaking = true;
-        m_silence_frames = 0;
+    // Always process audio (no VAD)
+    m_result_buffer = m_engine->process_audio(audio);
+    handle_speech_result(m_result_buffer);
 
-        // Process with Vosk
-        m_result_buffer = m_engine->process_audio(audio);
-        handle_speech_result(m_result_buffer);
-
-        // Add periodic finalization even during speech for more frequent results
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           now - m_last_finalize_time).count();
-
-        if (elapsed >= m_finalize_interval_ms) {
-            LOG_INFO("Periodic finalization during speech after " + std::to_string(elapsed) + "ms");
-            force_finalize();
-            m_last_finalize_time = now;
-        }
-    } else {
-        // Silence detected (only happens when VAD is enabled)
-        if (m_was_speaking) {
-            m_silence_frames++;
-
-            // More verbose logging for silence frame counting
-            if (m_silence_frames % 2 == 0) {  // Log every other frame
-                LOG_DEBUG("Silence frame count: " + std::to_string(m_silence_frames) +
-                          "/" + std::to_string(m_silence_frames_threshold) +
-                          " (" + std::to_string(m_silence_frames * m_buffer_ms) +
-                          "ms/" + std::to_string(m_silence_frames_threshold * m_buffer_ms) + "ms)");
-            }
-
-            if (m_silence_frames >= m_silence_frames_threshold) {
-                LOG_INFO("Finalizing speech after " +
-                         std::to_string(m_silence_frames * m_buffer_ms) + "ms of silence");
-                force_finalize();
-            }
-        }
-
-        // Show silence indicator only if showing partials and using VAD
-        if (m_use_vad && m_show_partial && m_silence_frames % 10 == 0) {
-            std::cout << "\r[Silence]                    " << std::flush;
-        }
+    // Time-based finalization
+    if (elapsed >= m_finalize_interval_ms) {
+        LOG_INFO("Time-based finalization after " + std::to_string(elapsed) + "ms");
+        force_finalize();
+        m_last_finalize_time = now;
     }
 }
 
@@ -167,20 +117,6 @@ void audio_processor::handle_partial_result(const std::string& partial) {
     std::cout << "\r[PARTIAL] " << partial << "...              " << std::flush;
 }
 
-void audio_processor::update_debug_status() {
-    auto now = std::chrono::steady_clock::now();
-    auto debug_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             now - m_last_debug_time).count();
-
-    if (debug_elapsed >= 1000) {  // Log once per second
-        bool is_speech = m_vad->process(std::vector<int16_t>{});  // Get current state
-        LOG_DEBUG("VAD status: " + std::string(is_speech ? "SPEECH" : "SILENCE") +
-                  ", silence frames: " + std::to_string(m_silence_frames) +
-                  ", threshold: " + std::to_string(m_silence_frames_threshold));
-        m_last_debug_time = now;
-    }
-}
-
 void audio_processor::force_finalize() {
     // Force final result
     m_result_buffer = m_engine->process_audio({}, true);
@@ -199,8 +135,6 @@ void audio_processor::force_finalize() {
 
     // Reset recognizer for next utterance
     m_engine->reset();
-    m_was_speaking = false;
-    m_silence_frames = 0;
     m_last_partial_text.clear();
 
     // Reset finalize timer
